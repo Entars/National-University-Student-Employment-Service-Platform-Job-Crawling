@@ -1,0 +1,2 @@
+# National University Student Employment Service Platform Job Crawling
+这是一个爬虫项目，利用Selenium和Urllib3爬取国家大学生就业服务平台上的工作岗位并将其输出为json文件
