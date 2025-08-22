@@ -6,6 +6,8 @@ from multiprocessing import Manager
 from bs4 import BeautifulSoup
 import urllib3
 import json
+from tqdm.auto import tqdm
+import sys
 from  fake_useragent import UserAgent
 from selenium import  webdriver
 from selenium.webdriver.common.by import By
@@ -14,6 +16,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 #抑制认证警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+
 
 def keep_connect(chrome_location,username,password):
     """使用selenium模拟登录，获取Cookie，并维持登录状态防止服务器端将Cookie注销"""
@@ -75,7 +80,7 @@ def Cookie_concat(got_property):
 
     for i in property_rank:
         Cookie = Cookie + i + '=' + property_all[i] + '; '
-    print('完成Cookie创建')
+    print("------------------完成Cookie创建------------------")
 
     return Cookie
 
@@ -185,8 +190,12 @@ def pares_detail_job_info(html,job_info):
     """将爬取到的详情页进行解析，获取“岗位介绍”部分的数据"""
     soup = BeautifulSoup(html,'html.parser')
 
-    job_detail_describe_div =soup.find(name='pre',attrs={'class':"mainContent mainContent"})
-    job_detail_describe = job_detail_describe_div.getText()
+    job_detail_describe_div =soup.find(name='div',attrs={'class':"details"})
+    if job_detail_describe_div is not None:
+        job_detail_describe = job_detail_describe_div.getText()
+    else:
+        print(f"未找到岗位描述元素，岗位ID:{job_info.get('岗位ID')}")
+        job_detail_describe = "未知"
 
     job_info.update({
         "岗位介绍":job_detail_describe
@@ -221,93 +230,101 @@ def parse_job_info(job):
 
 
 
-def list_page_worker(list_page_queue,http,Cookie,detail_task_queue):
+def list_page_worker(list_page_queue,http,Cookie,detail_task_queue,list_pbar):
     """获取岗位列表的工作流程"""
 
-    global list_get_wrong
+    global list_get_wrong,list_pages_done,enqueued_jobs_count
     page = None
 
     while True:
         try:
             #获取任务
             page = list_page_queue.get(timeout=30)
+        except queue.Empty:
+            thread_name = threading.current_thread().name
+            print(f"列表页任务队列空，线程{thread_name}准备退出")
+            continue
+
+        try:
             if page == None:
                 list_page_queue.task_done()
                 break
 
-            print(f"开始爬取列表页{page}")
+            #print(f"开始爬取列表页{page}")
 
 
             #爬取列表页
             jobs = get_job_data(http=http,Cookie=Cookie,page=page,page_size=10)
 
             if jobs:
-                print(f"列表页{page}获取到{len(jobs)}个岗位")
+                #print(f"列表页{page}获取到{len(jobs)}个岗位")
                 for job in jobs:
                     job_info = parse_job_info(job)
                     detail_task_queue.put(job_info)
+                    with progress_lock:
+                        enqueued_jobs_count += 1
 
             #随机延迟
             time.sleep(random.uniform(0.5,1.5))
 
-            list_page_queue.task_done()
-
-        except queue.Empty:
-            thread_name = threading.current_thread().name
-            print(f"列表页任务队列空，线程{thread_name}准备退出")
-            continue
-
         except Exception as e:
             print(f"列表页工作线程异常: {str(e)}")
-            list_page_queue.task_done()
             if page:
                 list_get_wrong.append(page)
             time.sleep(5)
 
+        finally:
+            list_pages_done += 1
+            list_pbar.update(1)
+            list_page_queue.task_done()
 
 
 
 
-def detail_page_worker(detail_task_queue,result_queue,http,Cookie):
+
+def detail_page_worker(detail_task_queue,result_queue,http,Cookie,detail_pbar):
     """详情页工作流程"""
 
-    global detail_get_wrong
+    global detail_get_wrong,detail_jobs_done
     job_id = None
 
     while True:
         try:
             job_info = detail_task_queue.get(timeout=30)
+        except queue.Empty:
+            thread_name = threading.current_thread().name
+            print(f"详情页任务队列空，线程{thread_name}准备退出")
+            continue
+        try:
             if job_info == None:
                 detail_task_queue.task_done()
                 break
 
             job_id = job_info.get("岗位ID")
 
-            print(f"开始爬取详情页{job_id}")
+            #print(f"开始爬取详情页{job_id}")
 
             html=fetch_detail_page(job_id,http,Cookie)
 
             if html:
                 new_job_info = pares_detail_job_info(html,job_info)
                 result_queue.put(new_job_info)
-                print(f"详情页{job_id}解析完成")
+               # print(f"详情页{job_id}解析完成")
             else:
                 print(f"详情页{job_id}爬取失败")
 
             time.sleep(random.uniform(0.3,0.8))
 
-            detail_task_queue.task_done()
-        except queue.Empty:
-            thread_name = threading.current_thread().name
-            print(f"详情页任务队列空，线程{thread_name}准备退出")
-            continue
 
         except Exception as e:
             print(f"详情页工作线程异常: {str(e)}")
-            detail_task_queue.task_done()
             if job_id:
                 detail_get_wrong.append(job_id)
             time.sleep(3)
+        finally:
+            detail_jobs_done += 1
+            detail_pbar.update(1)
+            detail_task_queue.task_done()
 
 
 def result_writer(result_queue, output_address):
@@ -317,7 +334,7 @@ def result_writer(result_queue, output_address):
     time_month = struc_time.tm_mon
     time_day = struc_time.tm_mday
 
-    output_file = output_address + f'{time_year}/{time_month}/{time_day}_jobs'
+    output_file = output_address + f'{time_year}_{time_month}_{time_day}_jobs'
 
     count = 0
     with open(output_file, "a", encoding='utf-8', newline='') as f:
@@ -349,6 +366,7 @@ def result_writer(result_queue, output_address):
 
 def process_manager(total_pages,http,Cookie,num_list_workers=2,num_detail_workers=8,output_address=""):
     """进程管理器（主进程）"""
+    global  enqueued_jobs_count
     start_time = time.time()
     print(f"开始爬取任务，总页数: {total_pages}")
 
@@ -359,10 +377,16 @@ def process_manager(total_pages,http,Cookie,num_list_workers=2,num_detail_worker
         detail_task_queue = manager.Queue(maxsize=5000)
         result_queue = manager.Queue()
 
-
         #添加列表页任务
         for page in range(1,total_pages+1):
             list_page_queue.put(page)
+
+        expected_total_list_pages = total_pages
+        expected_total_detail_jobs = total_pages * 10
+
+        #进度条
+        list_pbar = tqdm(total=expected_total_list_pages,desc='列表页',unit='页',dynamic_ncols=True,file=sys.stdout)
+        detail_pbar = tqdm(total=expected_total_detail_jobs,desc='详情页',unit='项',dynamic_ncols=True,file=sys.stdout)
 
         #创建并启动线程
         threads = []
@@ -371,7 +395,7 @@ def process_manager(total_pages,http,Cookie,num_list_workers=2,num_detail_worker
         for i in range(num_list_workers):
             t = threading.Thread(
                 target=list_page_worker,
-                args=(list_page_queue,http,Cookie,detail_task_queue),
+                args=(list_page_queue,http,Cookie,detail_task_queue,list_pbar),
                 name=f"ListWorker-{i+1}",
                 daemon=True
             )
@@ -382,7 +406,7 @@ def process_manager(total_pages,http,Cookie,num_list_workers=2,num_detail_worker
         for i in range(num_detail_workers):
             t = threading.Thread(
                 target=detail_page_worker,
-                args=(detail_task_queue,result_queue,http,Cookie),
+                args=(detail_task_queue,result_queue,http,Cookie,detail_pbar),
                 name=f"DetailWorker-{i+1}",
                 daemon=True
             )
@@ -407,6 +431,13 @@ def process_manager(total_pages,http,Cookie,num_list_workers=2,num_detail_worker
         print(f"所有列表页任务已完成,{num_list_workers}个工作线程已退出")
 
 
+        #调整详情任务总数
+        with progress_lock:
+            actual_enqueued = enqueued_jobs_count
+        if actual_enqueued > 0 and actual_enqueued < detail_pbar.total:
+            detail_pbar.total = actual_enqueued
+            detail_pbar.refresh()
+
 
         #等待详情页任务队列为空（详情页任务完成）
         detail_task_queue.join()
@@ -427,10 +458,18 @@ def process_manager(total_pages,http,Cookie,num_list_workers=2,num_detail_worker
 
         elapsed_time = time.time() - start_time
 
+        list_pbar.close()
+        detail_pbar.close()
+
         print(f"爬取完成! 总耗时: {elapsed_time:.2f} 秒")
 
 
 if __name__ == "__main__":
+    #全局变量
+    progress_lock = threading.Lock()
+    list_pages_done = 0
+    detail_jobs_done =0
+    enqueued_jobs_count = 0
     # 配置爬取参数
     TOTAL_PAGES = 100  # 要爬取的列表页总数
     NUM_LIST_WORKERS = 2  # 列表页工作线程数
@@ -438,8 +477,8 @@ if __name__ == "__main__":
     OUTPUT_ADDRESS = ""  # 输出文件的地址，默认为项目地址
     #配置模拟登录参数
     chrome_location = r'D:\python_project\Google\Chrome\Application\chrome.exe' #chrome启动器的位置
-    username = "" #模拟登录的账号
-    password = ""#模拟登陆的密码
+    username = "15897310548" #模拟登录的账号
+    password = "2453829998Hu"#模拟登陆的密码
 
     detail_get_wrong = [] #获取详情失败的job_id
     list_get_wrong = [] #获取岗位失败的页码
