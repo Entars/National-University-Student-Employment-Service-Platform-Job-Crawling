@@ -472,8 +472,8 @@ if __name__ == "__main__":
     OUTPUT_ADDRESS = ""  # 输出文件的地址，默认为项目地址
     #配置模拟登录参数
     chrome_location = r'D:\python_project\Google\Chrome\Application\chrome.exe' #chrome启动器的位置
-    username = "15897310548" #模拟登录的账号
-    password = "2453829998Hu"#模拟登陆的密码
+    username = "" #模拟登录的账号
+    password = ""#模拟登陆的密码
 
     detail_get_wrong = [] #获取详情失败的job_id
     list_get_wrong = [] #获取岗位失败的页码
