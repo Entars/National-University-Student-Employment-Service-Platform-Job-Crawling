@@ -18,6 +18,24 @@ from selenium.webdriver.support.ui import WebDriverWait
 #抑制认证警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+def platform_choose():
+    print("请选择平台(数字)：\n 1.BOSS \n 2.国家大学生就业服务平台 \n 3.国聘 \n 4.智联招聘 \n 5.省市及高校 \n 6.拉钩 \n 7.退出")
+    platform_num = input("请输入：")
+    if platform_num.isdigit():
+        int_num = int(platform_num)
+        if int_num <= 6 and int_num >= 1:
+            return int_num
+        elif int_num == 7:
+            print("------------成功退出-----------")
+            sys.exit()
+    print("------------输入错误-----------")
+    platform_choose()
+
+def sourcetype(code):
+    if code == 5:
+        return "1"
+    else:
+        return ""
 
 def keep_connect(chrome_location,username,password):
     """使用selenium模拟登录，获取Cookie，并维持登录状态防止服务器端将Cookie注销"""
@@ -102,7 +120,7 @@ def generate_timestamp():
 
 
 
-def get_job_data(http,Cookie,page=1,page_size=10):
+def get_job_data(http,Cookie,source_name,source_type,page=1,page_size=10):
     """获取岗位数据"""
     baseurl = "https://www.ncss.cn/student/jobs/jobslist/ajax/"
     #构造请求头
@@ -129,8 +147,8 @@ def get_job_data(http,Cookie,page=1,page_size=10):
         "limit": page_size,
         "keyUnits": "",
         "degreeCode": "",
-        "sourcesName": "0",
-        "sourcesType": "",
+        "sourcesName": source_name,
+        "sourcesType": source_type,
         "_": generate_timestamp()  # 动态时间戳
     }
 
@@ -232,7 +250,7 @@ def parse_job_info(job):
 
 
 
-def list_page_worker(list_page_queue, http, Cookie, detail_task_queue, list_pbar):
+def list_page_worker(list_page_queue, http, Cookie, detail_task_queue, list_pbar,source_name,source_type):
     """获取岗位列表的工作流程"""
     global list_get_wrong, list_pages_done, enqueued_jobs_count
 
@@ -246,7 +264,7 @@ def list_page_worker(list_page_queue, http, Cookie, detail_task_queue, list_pbar
                 break
 
             # 爬取列表页
-            jobs = get_job_data(http=http, Cookie=Cookie, page=page, page_size=10)
+            jobs = get_job_data(http=http, Cookie=Cookie, page=page,source_name=source_name,source_type=source_type, page_size=10)
             if jobs:
                 for job in jobs:
                     job_info = parse_job_info(job)
@@ -322,14 +340,14 @@ def detail_page_worker(detail_task_queue,result_queue,http,Cookie,detail_pbar):
                 detail_task_queue.task_done()
 
 
-def result_writer(result_queue, output_address):
+def result_writer(result_queue, output_address,platform):
     """结果写入线程"""
     struc_time = time.localtime()
     time_year = struc_time.tm_year
     time_month = struc_time.tm_mon
     time_day = struc_time.tm_mday
 
-    output_file = output_address + f'{time_year}_{time_month}_{time_day}_jobs'
+    output_file = f"{output_address}{platform}_{time_year}_{time_month}_{time_day}_jobs.json"
 
     count = 0
     with open(output_file, "a", encoding='utf-8', newline='') as f:
@@ -359,7 +377,7 @@ def result_writer(result_queue, output_address):
 
 
 
-def process_manager(total_pages,http,Cookie,num_list_workers=2,num_detail_workers=8,output_address=""):
+def process_manager(total_pages,http,Cookie,source_name,source_type,platform,num_list_workers=2,num_detail_workers=8,output_address=""):
     """进程管理器（主进程）"""
     global  enqueued_jobs_count
     start_time = time.time()
@@ -390,7 +408,7 @@ def process_manager(total_pages,http,Cookie,num_list_workers=2,num_detail_worker
         for i in range(num_list_workers):
             t = threading.Thread(
                 target=list_page_worker,
-                args=(list_page_queue,http,Cookie,detail_task_queue,list_pbar),
+                args=(list_page_queue,http,Cookie,detail_task_queue,list_pbar,source_name,source_type),
                 name=f"ListWorker-{i+1}",
                 daemon=True
             )
@@ -411,7 +429,7 @@ def process_manager(total_pages,http,Cookie,num_list_workers=2,num_detail_worker
         #结果写入线程
         writer_thread = threading.Thread(
             target=result_writer,
-            args=(result_queue,output_address),
+            args=(result_queue,output_address,platform),
             name="ResultWriter",
             daemon=True
         )
@@ -465,19 +483,25 @@ if __name__ == "__main__":
     list_pages_done = 0
     detail_jobs_done =0
     enqueued_jobs_count = 0
+    platform_code = {1:"2000846399",2:"0",3:"gn5yn9s9wjydmrlh5kre1rzkma8mmjbu",4:"fawzqa3wo3hy2x4uqe1b1bwy4met2wpb",5:"",6:"kw1l0wxnmrjublxvvuny363bct3z11eo"}
+    platform_name = {1:"BOSS",2:"国大",3:"国聘",4:"智联",5:"省校",6:"拉钩"}
     # 配置爬取参数
-    TOTAL_PAGES = 200  # 要爬取的列表页总数
-    NUM_LIST_WORKERS = 2  # 列表页工作线程数
-    NUM_DETAIL_WORKERS = 5  # 详情页工作线程数
-    OUTPUT_ADDRESS = ""  # 输出文件的地址，默认为项目地址
+    TOTAL_PAGES = 400  # 要爬取的列表页总数
+    NUM_LIST_WORKERS = 4  # 列表页工作线程数
+    NUM_DETAIL_WORKERS = 10  # 详情页工作线程数
+    OUTPUT_ADDRESS = "data\\"  # 输出文件的地址，默认为项目地址
     #配置模拟登录参数
     chrome_location = r'D:\python_project\Google\Chrome\Application\chrome.exe' #chrome启动器的位置
-    username = "" #模拟登录的账号
-    password = ""#模拟登陆的密码
+    username = "15897310548" #模拟登录的账号
+    password = "2453829998Hu"#模拟登陆的密码
 
     detail_get_wrong = [] #获取详情失败的job_id
     list_get_wrong = [] #获取岗位失败的页码
 
+    code = platform_choose()
+    source_name = platform_code.get(code)
+    source_type = sourcetype(code)
+    platform = platform_name.get(code)
 
     #构建连接池
     print("------------------开始构建连接池------------------")
@@ -505,7 +529,10 @@ if __name__ == "__main__":
         num_detail_workers=NUM_DETAIL_WORKERS,
         output_address=OUTPUT_ADDRESS,
         http = http,
-        Cookie = Cookie
+        Cookie = Cookie,
+        source_name = source_name,
+        source_type = source_type,
+        platform = platform
     )
     print("-------------------完成网络爬取-------------------")
 
